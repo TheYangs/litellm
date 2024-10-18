@@ -42,12 +42,12 @@ spec:
             - name: DATABASE_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "litellm.fullname" . }}-dbcredentials
+                  name: {{ include "litellm.fullname" . }}-secret
                   key: username
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "litellm.fullname" . }}-dbcredentials
+                  name: {{ include "litellm.fullname" . }}-secret
                   key: password
             - name: DATABASE_HOST
               value: {{ .Release.Name }}-postgresql
@@ -66,6 +66,8 @@ spec:
                   key: {{ .Values.db.secret.passwordKey }}
             - name: DATABASE_HOST
               value: {{ .Values.db.endpoint }}
+            - name: STORE_MODEL_IN_DB
+              value: "true"
             - name: DATABASE_NAME
               value: {{ .Values.db.database }}
             {{- end }}
@@ -104,22 +106,26 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: HOST
-              value: "{{ .Values.listen | default "0.0.0.0" }}"
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: PORT
               value: {{ .Values.service.port | quote}}
             {{- if .Values.db.deployStandalone }}
             - name: DATABASE_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "litellm.fullname" . }}-dbcredentials
+                  name: {{ include "litellm.fullname" . }}-secret
                   key: username
             - name: DATABASE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "litellm.fullname" . }}-dbcredentials
+                  name: {{ include "litellm.fullname" . }}-secret
                   key: password
             - name: DATABASE_HOST
               value: {{ .Release.Name }}-postgresql
+            - name: STORE_MODEL_IN_DB
+              value: "true"
             - name: DATABASE_NAME
               value: litellm
             {{- else if .Values.db.useExisting }}
@@ -143,7 +149,7 @@ spec:
             - name: PROXY_MASTER_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "litellm.fullname" . }}-masterkey
+                  name: {{ include "litellm.fullname" . }}-secret
                   key: masterkey
             {{- if .Values.redis.enabled }}
             - name: REDIS_HOST
@@ -172,21 +178,6 @@ spec:
             - name: http
               containerPort: {{ .Values.service.port }}
               protocol: TCP
-          livenessProbe:
-            httpGet:
-              path: /health/liveliness
-              port: http
-          readinessProbe:
-            httpGet:
-              path: /health/readiness
-              port: http
-          # Give the container time to start up.  Up to 5 minutes (10 * 30 seconds)
-          startupProbe:
-            httpGet:
-              path: /health/readiness
-              port: http
-            failureThreshold: 30
-            periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
