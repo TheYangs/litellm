@@ -5,7 +5,7 @@ import traceback
 import uuid
 import xml.etree.ElementTree as ET
 from enum import Enum
-from typing import Any, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, List, Mapping, MutableMapping, Optional, Sequence, Tuple, cast
 
 from jinja2 import BaseLoader, Template, exceptions, meta
 from jinja2.sandbox import ImmutableSandboxedEnvironment
@@ -26,13 +26,21 @@ from litellm.types.completion import (
 )
 from litellm.types.llms.anthropic import *
 from litellm.types.llms.bedrock import MessageBlock as BedrockMessageBlock
+from litellm.types.llms.ollama import OllamaVisionModelObject
 from litellm.types.llms.openai import (
+    AllMessageValues,
     ChatCompletionAssistantMessage,
+    ChatCompletionAssistantToolCall,
     ChatCompletionFunctionMessage,
+    ChatCompletionImageObject,
+    ChatCompletionTextObject,
     ChatCompletionToolCallFunctionChunk,
     ChatCompletionToolMessage,
+    ChatCompletionUserMessage,
 )
 from litellm.types.utils import GenericImageParsingChunk
+
+from .image_handling import async_convert_url_to_base64, convert_url_to_base64
 
 
 def default_pt(messages):
@@ -54,7 +62,11 @@ DEFAULT_USER_CONTINUE_MESSAGE = {
 # used to interweave assistant messages, to ensure user/assistant alternating
 DEFAULT_ASSISTANT_CONTINUE_MESSAGE = {
     "role": "assistant",
-    "content": "Please continue.",
+    "content": [
+        {
+            "text": "Please continue.",
+        }
+    ],
 }  # similar to autogen. Only used if `litellm.modify_params=True`.
 
 
@@ -159,7 +171,9 @@ def convert_to_ollama_image(openai_image_url: str):
 
 def ollama_pt(
     model, messages
-):  # https://github.com/ollama/ollama/blob/af4cf55884ac54b9e637cd71dadfe9b7a5685877/docs/modelfile.md#template
+) -> Union[
+    str, OllamaVisionModelObject
+]:  # https://github.com/ollama/ollama/blob/af4cf55884ac54b9e637cd71dadfe9b7a5685877/docs/modelfile.md#template
     if "instruct" in model:
         prompt = custom_prompt(
             role_dict={
@@ -433,7 +447,7 @@ def hf_chat_template(model: str, messages: list, chat_template: Optional[Any] = 
     def _is_system_in_template():
         try:
             # Try rendering the template with a system message
-            response = template.render(
+            template.render(
                 messages=[{"role": "system", "content": "test"}],
                 eos_token="<eos>",
                 bos_token="<bos>",
@@ -441,10 +455,11 @@ def hf_chat_template(model: str, messages: list, chat_template: Optional[Any] = 
             return True
 
         # This will be raised if Jinja attempts to render the system message and it can't
-        except:
+        except Exception:
             return False
 
     try:
+        rendered_text = ""
         # Render the template with the provided values
         if _is_system_in_template():
             rendered_text = template.render(
@@ -455,8 +470,8 @@ def hf_chat_template(model: str, messages: list, chat_template: Optional[Any] = 
             )
         else:
             # treat a system message as a user message, if system not in template
+            reformatted_messages = []
             try:
-                reformatted_messages = []
                 for message in messages:
                     if message["role"] == "system":
                         reformatted_messages.append(
@@ -493,10 +508,9 @@ def hf_chat_template(model: str, messages: list, chat_template: Optional[Any] = 
 
         return rendered_text
     except Exception as e:
-        verbose_logger.exception(
-            "Error rendering huggingface chat template - {}".format(str(e))
-        )
-        raise Exception(f"Error rendering template - {str(e)}")
+        raise Exception(
+            f"Error rendering template - {str(e)}"
+        )  # don't use verbose_logger.exception, if exception is raised
 
 
 # Anthropic template
@@ -552,30 +566,31 @@ def get_model_info(token, model):
             return None, None
         else:
             return None, None
-    except Exception as e:  # safely fail a prompt template request
+    except Exception:  # safely fail a prompt template request
         return None, None
 
 
-def format_prompt_togetherai(messages, prompt_format, chat_template):
-    if prompt_format is None:
-        return default_pt(messages)
+## OLD TOGETHER AI FLOW
+# def format_prompt_togetherai(messages, prompt_format, chat_template):
+#     if prompt_format is None:
+#         return default_pt(messages)
 
-    human_prompt, assistant_prompt = prompt_format.split("{prompt}")
+#     human_prompt, assistant_prompt = prompt_format.split("{prompt}")
 
-    if chat_template is not None:
-        prompt = hf_chat_template(
-            model=None, messages=messages, chat_template=chat_template
-        )
-    elif prompt_format is not None:
-        prompt = custom_prompt(
-            role_dict={},
-            messages=messages,
-            initial_prompt_value=human_prompt,
-            final_prompt_value=assistant_prompt,
-        )
-    else:
-        prompt = default_pt(messages)
-    return prompt
+#     if chat_template is not None:
+#         prompt = hf_chat_template(
+#             model=None, messages=messages, chat_template=chat_template
+#         )
+#     elif prompt_format is not None:
+#         prompt = custom_prompt(
+#             role_dict={},
+#             messages=messages,
+#             initial_prompt_value=human_prompt,
+#             final_prompt_value=assistant_prompt,
+#         )
+#     else:
+#         prompt = default_pt(messages)
+#     return prompt
 
 
 ### IBM Granite
@@ -699,44 +714,6 @@ def construct_tool_use_system_prompt(
         "<tools>\n" + "\n".join([tool_str for tool_str in tool_str_list]) + "\n</tools>"
     )
     return tool_use_system_prompt
-
-
-def convert_url_to_base64(url):
-    import base64
-
-    client = HTTPHandler(concurrent_limit=1)
-    for _ in range(3):
-        try:
-
-            response = client.get(url)
-            break
-        except:
-            pass
-    if response.status_code == 200:
-        image_bytes = response.content
-        base64_image = base64.b64encode(image_bytes).decode("utf-8")
-
-        image_type = response.headers.get("Content-Type", None)
-        if image_type is not None:
-            img_type = image_type
-        else:
-            img_type = url.split(".")[-1].lower()
-            if img_type == "jpg" or img_type == "jpeg":
-                img_type = "image/jpeg"
-            elif img_type == "png":
-                img_type = "image/png"
-            elif img_type == "gif":
-                img_type = "image/gif"
-            elif img_type == "webp":
-                img_type = "image/webp"
-            else:
-                raise Exception(
-                    f"Error: Unsupported image format. Format={img_type}. Supported types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']"
-                )
-
-        return f"data:{img_type};base64,{base64_image}"
-    else:
-        raise Exception(f"Error: Unable to fetch image from URL. url={url}")
 
 
 def convert_to_anthropic_image_obj(openai_image_url: str) -> GenericImageParsingChunk:
@@ -943,6 +920,31 @@ def anthropic_messages_pt_xml(messages: list):
 # ------------------------------------------------------------------------------
 
 
+def _azure_tool_call_invoke_helper(
+    function_call_params: ChatCompletionToolCallFunctionChunk,
+) -> Optional[ChatCompletionToolCallFunctionChunk]:
+    """
+    Azure requires 'arguments' to be a string.
+    """
+    if function_call_params.get("arguments") is None:
+        function_call_params["arguments"] = ""
+    return function_call_params
+
+
+def convert_to_azure_openai_messages(
+    messages: List[AllMessageValues],
+) -> List[AllMessageValues]:
+    for m in messages:
+        if m["role"] == "assistant":
+            function_call = m.get("function_call", None)
+            if function_call is not None:
+                m["function_call"] = _azure_tool_call_invoke_helper(function_call)
+    return messages
+
+
+# ------------------------------------------------------------------------------
+
+
 def infer_protocol_value(
     value: Any,
 ) -> Literal[
@@ -1097,7 +1099,7 @@ def convert_to_gemini_tool_call_invoke(
             else:  # don't silently drop params. Make it clear to user what's happening.
                 raise Exception(
                     "function_call missing. Received tool call with 'type': 'function'. No function call in argument - {}".format(
-                        tool
+                        message
                     )
                 )
         return _parts_list
@@ -1129,7 +1131,14 @@ def convert_to_gemini_tool_call_result(
         "content": "function result goes here",
     }
     """
-    content = message.get("content", "")
+    content_str: str = ""
+    if isinstance(message["content"], str):
+        content_str = message["content"]
+    elif isinstance(message["content"], List):
+        content_list = message["content"]
+        for content in content_list:
+            if content["type"] == "text":
+                content_str += content["text"]
     name: Optional[str] = message.get("name", "")  # type: ignore
 
     # Recover name from last message with tool calls
@@ -1154,10 +1163,10 @@ def convert_to_gemini_tool_call_result(
 
     # We can't determine from openai message format whether it's a successful or
     # error call result so default to the successful result template
-    inferred_content_value = infer_protocol_value(value=content)
+    inferred_content_value = infer_protocol_value(value=content_str)
 
     _field = litellm.types.llms.vertex_ai.Field(
-        key="content", value={inferred_content_value: content}
+        key="content", value={inferred_content_value: content_str}
     )
 
     _function_call_args = litellm.types.llms.vertex_ai.FunctionCallArgs(fields=_field)
@@ -1171,7 +1180,9 @@ def convert_to_gemini_tool_call_result(
     return _part
 
 
-def convert_to_anthropic_tool_result(message: dict) -> AnthropicMessagesToolResultParam:
+def convert_to_anthropic_tool_result(
+    message: Union[ChatCompletionToolMessage, ChatCompletionFunctionMessage]
+) -> AnthropicMessagesToolResultParam:
     """
     OpenAI message with a tool result looks like:
     {
@@ -1203,21 +1214,29 @@ def convert_to_anthropic_tool_result(message: dict) -> AnthropicMessagesToolResu
         ]
     }
     """
+    content_str: str = ""
+    if isinstance(message["content"], str):
+        content_str = message["content"]
+    elif isinstance(message["content"], List):
+        content_list = message["content"]
+        for content in content_list:
+            if content["type"] == "text":
+                content_str += content["text"]
     if message["role"] == "tool":
-        tool_call_id: str = message.get("tool_call_id")  # type: ignore
-        content: str = message.get("content")  # type: ignore
+        tool_message: ChatCompletionToolMessage = message
+        tool_call_id: str = tool_message["tool_call_id"]
 
         # We can't determine from openai message format whether it's a successful or
         # error call result so default to the successful result template
         anthropic_tool_result = AnthropicMessagesToolResultParam(
-            type="tool_result", tool_use_id=tool_call_id, content=content
+            type="tool_result", tool_use_id=tool_call_id, content=content_str
         )
         return anthropic_tool_result
     if message["role"] == "function":
-        content = message.get("content")  # type: ignore
-        tool_call_id = message.get("tool_call_id") or str(uuid.uuid4())
+        function_message: ChatCompletionFunctionMessage = message
+        tool_call_id = function_message.get("tool_call_id") or str(uuid.uuid4())
         anthropic_tool_result = AnthropicMessagesToolResultParam(
-            type="tool_result", tool_use_id=tool_call_id, content=content
+            type="tool_result", tool_use_id=tool_call_id, content=content_str
         )
 
         return anthropic_tool_result
@@ -1230,15 +1249,17 @@ def convert_to_anthropic_tool_result(message: dict) -> AnthropicMessagesToolResu
 
 
 def convert_function_to_anthropic_tool_invoke(
-    function_call,
+    function_call: Union[dict, ChatCompletionToolCallFunctionChunk],
 ) -> List[AnthropicMessagesToolUseParam]:
     try:
+        _name = get_attribute_or_key(function_call, "name") or ""
+        _arguments = get_attribute_or_key(function_call, "arguments")
         anthropic_tool_invoke = [
             AnthropicMessagesToolUseParam(
                 type="tool_use",
                 id=str(uuid.uuid4()),
-                name=get_attribute_or_key(function_call, "name"),
-                input=json.loads(get_attribute_or_key(function_call, "arguments")),
+                name=_name,
+                input=json.loads(_arguments) if _arguments else {},
             )
         ]
         return anthropic_tool_invoke
@@ -1247,7 +1268,7 @@ def convert_function_to_anthropic_tool_invoke(
 
 
 def convert_to_anthropic_tool_invoke(
-    tool_calls: list,
+    tool_calls: List[ChatCompletionAssistantToolCall],
 ) -> List[AnthropicMessagesToolUseParam]:
     """
     OpenAI tool invokes:
@@ -1307,17 +1328,19 @@ def add_cache_control_to_content(
     anthropic_content_element: Union[
         dict, AnthropicMessagesImageParam, AnthropicMessagesTextParam
     ],
-    orignal_content_element: dict,
+    orignal_content_element: Union[dict, AllMessageValues],
 ):
-    if "cache_control" in orignal_content_element:
-        anthropic_content_element["cache_control"] = orignal_content_element[
-            "cache_control"
-        ]
+    cache_control_param = orignal_content_element.get("cache_control")
+    if cache_control_param is not None and isinstance(cache_control_param, dict):
+        transformed_param = ChatCompletionCachedContent(**cache_control_param)  # type: ignore
+
+        anthropic_content_element["cache_control"] = transformed_param
+
     return anthropic_content_element
 
 
 def anthropic_messages_pt(
-    messages: list,
+    messages: List[AllMessageValues],
     model: str,
     llm_provider: str,
 ) -> List[
@@ -1348,13 +1371,25 @@ def anthropic_messages_pt(
     while msg_i < len(messages):
         user_content: List[AnthropicMessagesUserMessageValues] = []
         init_msg_i = msg_i
+        if isinstance(messages[msg_i], BaseModel):
+            messages[msg_i] = dict(messages[msg_i])  # type: ignore
         ## MERGE CONSECUTIVE USER CONTENT ##
         while msg_i < len(messages) and messages[msg_i]["role"] in user_message_types:
-            if isinstance(messages[msg_i]["content"], list):
-                for m in messages[msg_i]["content"]:
+            user_message_types_block: Union[
+                ChatCompletionToolMessage,
+                ChatCompletionUserMessage,
+                ChatCompletionFunctionMessage,
+            ] = messages[
+                msg_i
+            ]  # type: ignore
+            if user_message_types_block["content"] and isinstance(
+                user_message_types_block["content"], list
+            ):
+                for m in user_message_types_block["content"]:
                     if m.get("type", "") == "image_url":
+                        m = cast(ChatCompletionImageObject, m)
                         image_chunk = convert_to_anthropic_image_obj(
-                            m["image_url"]["url"]
+                            openai_image_url=m["image_url"]["url"]  # type: ignore
                         )
 
                         _anthropic_content_element = AnthropicMessagesImageParam(
@@ -1366,31 +1401,55 @@ def anthropic_messages_pt(
                             ),
                         )
 
-                        anthropic_content_element = add_cache_control_to_content(
+                        _content_element = add_cache_control_to_content(
                             anthropic_content_element=_anthropic_content_element,
-                            orignal_content_element=m,
+                            orignal_content_element=dict(m),
                         )
-                        user_content.append(anthropic_content_element)
+
+                        if "cache_control" in _content_element:
+                            _anthropic_content_element["cache_control"] = (
+                                _content_element["cache_control"]
+                            )
+                        user_content.append(_anthropic_content_element)
                     elif m.get("type", "") == "text":
-                        _anthropic_text_content_element = {
-                            "type": "text",
-                            "text": m["text"],
-                        }
-                        anthropic_content_element = add_cache_control_to_content(
-                            anthropic_content_element=_anthropic_text_content_element,
-                            orignal_content_element=m,
+                        m = cast(ChatCompletionTextObject, m)
+                        _anthropic_text_content_element = AnthropicMessagesTextParam(
+                            type="text",
+                            text=m["text"],
                         )
-                        user_content.append(anthropic_content_element)
+                        _content_element = add_cache_control_to_content(
+                            anthropic_content_element=_anthropic_text_content_element,
+                            orignal_content_element=dict(m),
+                        )
+                        _content_element = cast(
+                            AnthropicMessagesTextParam, _content_element
+                        )
+
+                        user_content.append(_content_element)
             elif (
-                messages[msg_i]["role"] == "tool"
-                or messages[msg_i]["role"] == "function"
+                user_message_types_block["role"] == "tool"
+                or user_message_types_block["role"] == "function"
             ):
                 # OpenAI's tool message content will always be a string
-                user_content.append(convert_to_anthropic_tool_result(messages[msg_i]))
-            else:
                 user_content.append(
-                    {"type": "text", "text": messages[msg_i]["content"]}
+                    convert_to_anthropic_tool_result(user_message_types_block)
                 )
+            elif isinstance(user_message_types_block["content"], str):
+                _anthropic_content_text_element: AnthropicMessagesTextParam = {
+                    "type": "text",
+                    "text": user_message_types_block["content"],
+                }
+                _content_element = add_cache_control_to_content(
+                    anthropic_content_element=_anthropic_content_text_element,
+                    orignal_content_element=dict(user_message_types_block),
+                )
+
+                if "cache_control" in _content_element:
+                    _anthropic_content_text_element["cache_control"] = _content_element[
+                        "cache_control"
+                    ]
+
+                user_content.append(_anthropic_content_text_element)
 
             msg_i += 1
 
@@ -1400,10 +1459,11 @@ def anthropic_messages_pt(
         assistant_content: List[AnthropicMessagesAssistantMessageValues] = []
         ## MERGE CONSECUTIVE ASSISTANT CONTENT ##
         while msg_i < len(messages) and messages[msg_i]["role"] == "assistant":
-            if "content" in messages[msg_i] and isinstance(
-                messages[msg_i]["content"], list
+            assistant_content_block: ChatCompletionAssistantMessage = messages[msg_i]  # type: ignore
+            if "content" in assistant_content_block and isinstance(
+                assistant_content_block["content"], list
             ):
-                for m in messages[msg_i]["content"]:
+                for m in assistant_content_block["content"]:
                     # handle text
                     if (
                         m.get("type", "") == "text" and len(m.get("text", "")) > 0
@@ -1411,41 +1471,52 @@ def anthropic_messages_pt(
                         anthropic_message = AnthropicMessagesTextParam(
                             type="text", text=m.get("text")
                         )
-                        anthropic_message = add_cache_control_to_content(
+                        _cached_message = add_cache_control_to_content(
                             anthropic_content_element=anthropic_message,
-                            orignal_content_element=m,
+                            orignal_content_element=dict(m),
                         )
-                        assistant_content.append(anthropic_message)
+
+                        assistant_content.append(
+                            cast(AnthropicMessagesTextParam, _cached_message)
+                        )
             elif (
-                "content" in messages[msg_i]
-                and isinstance(messages[msg_i]["content"], str)
-                and len(messages[msg_i]["content"])
-                > 0  # don't pass empty text blocks. anthropic api raises errors.
+                "content" in assistant_content_block
+                and isinstance(assistant_content_block["content"], str)
+                and assistant_content_block[
+                    "content"
+                ]  # don't pass empty text blocks. anthropic api raises errors.
             ):
 
-                _anthropic_text_content_element = {
-                    "type": "text",
-                    "text": messages[msg_i]["content"],
-                }
-
-                anthropic_content_element = add_cache_control_to_content(
-                    anthropic_content_element=_anthropic_text_content_element,
-                    orignal_content_element=messages[msg_i],
+                _anthropic_text_content_element = AnthropicMessagesTextParam(
+                    type="text",
+                    text=assistant_content_block["content"],
                 )
-                assistant_content.append(anthropic_content_element)
 
-            if messages[msg_i].get(
-                "tool_calls", []
+                _content_element = add_cache_control_to_content(
+                    anthropic_content_element=_anthropic_text_content_element,
+                    orignal_content_element=dict(assistant_content_block),
+                )
+
+                if "cache_control" in _content_element:
+                    _anthropic_text_content_element["cache_control"] = _content_element[
+                        "cache_control"
+                    ]
+
+                assistant_content.append(_anthropic_text_content_element)
+
+            assistant_tool_calls = assistant_content_block.get("tool_calls")
+            if (
+                assistant_tool_calls is not None
             ):  # support assistant tool invoke conversion
                 assistant_content.extend(
-                    convert_to_anthropic_tool_invoke(messages[msg_i]["tool_calls"])
+                    convert_to_anthropic_tool_invoke(assistant_tool_calls)
                 )
 
-            if messages[msg_i].get("function_call"):
+            assistant_function_call = assistant_content_block.get("function_call")
+
+            if assistant_function_call is not None:
                 assistant_content.extend(
-                    convert_function_to_anthropic_tool_invoke(
-                        messages[msg_i]["function_call"]
-                    )
+                    convert_function_to_anthropic_tool_invoke(assistant_function_call)
                 )
 
             msg_i += 1
@@ -1558,30 +1629,6 @@ def get_system_prompt(messages):
     return system_prompt, messages
 
 
-def convert_to_documents(
-    observations: Any,
-) -> List[MutableMapping]:
-    """Converts observations into a 'document' dict"""
-    documents: List[MutableMapping] = []
-    if isinstance(observations, str):
-        # strings are turned into a key/value pair and a key of 'output' is added.
-        observations = [{"output": observations}]
-    elif isinstance(observations, Mapping):
-        # single mappings are transformed into a list to simplify the rest of the code.
-        observations = [observations]
-    elif not isinstance(observations, Sequence):
-        # all other types are turned into a key/value pair within a list
-        observations = [{"output": observations}]
-
-    for doc in observations:
-        if not isinstance(doc, Mapping):
-            # types that aren't Mapping are turned into a key/value pair.
-            doc = {"output": doc}
-        documents.append(doc)
-
-    return documents
-
-
 from litellm.types.llms.cohere import (
     CallObject,
     ChatHistory,
@@ -1595,7 +1642,8 @@ from litellm.types.llms.cohere import (
 
 
 def convert_openai_message_to_cohere_tool_result(
-    message, tool_calls: List
+    message: Union[ChatCompletionToolMessage, ChatCompletionFunctionMessage],
+    tool_calls: List,
 ) -> ToolResultObject:
     """
     OpenAI message with a tool result looks like:
@@ -1631,7 +1679,15 @@ def convert_openai_message_to_cohere_tool_result(
        ]
    },
     """
-    content_str: str = message.get("content", "")
+
+    content_str: str = ""
+    if isinstance(message["content"], str):
+        content_str = message["content"]
+    elif isinstance(message["content"], List):
+        content_list = message["content"]
+        for content in content_list:
+            if content["type"] == "text":
+                content_str += content["text"]
     if len(content_str) > 0:
         try:
             content = json.loads(content_str)
@@ -1658,7 +1714,8 @@ def convert_openai_message_to_cohere_tool_result(
                     arguments = json.loads(arguments_str)
 
     if message["role"] == "function":
-        name = message.get("name")
+        function_message: ChatCompletionFunctionMessage = message
+        name = function_message["name"]
         cohere_tool_result: ToolResultObject = {
             "call": CallObject(name=name, parameters=arguments),
             "outputs": [content],
@@ -1925,7 +1982,7 @@ def amazon_titan_pt(
 def _load_image_from_url(image_url):
     try:
         from PIL import Image
-    except:
+    except Exception:
         raise Exception("image conversion failed please run `pip install Pillow`")
     from io import BytesIO
 
@@ -1990,7 +2047,7 @@ def _gemini_vision_convert_messages(messages: list):
             else:
                 try:
                     from PIL import Image
-                except:
+                except Exception:
                     raise Exception(
                         "gemini image conversion failed please run `pip install Pillow`"
                     )
@@ -2038,7 +2095,7 @@ def gemini_text_image_pt(messages: list):
     """
     try:
         import google.generativeai as genai  # type: ignore
-    except:
+    except Exception:
         raise Exception(
             "Importing google.generativeai failed, please run 'pip install -q google-generativeai"
         )
@@ -2263,7 +2320,7 @@ def _convert_to_bedrock_tool_call_invoke(
 
 
 def _convert_to_bedrock_tool_call_result(
-    message: dict,
+    message: Union[ChatCompletionToolMessage, ChatCompletionFunctionMessage]
 ) -> BedrockContentBlock:
     """
     OpenAI message with a tool result looks like:
@@ -2305,11 +2362,18 @@ def _convert_to_bedrock_tool_call_result(
     """
     - 
     """
-    content = message.get("content", "")
-    name = message.get("name", "")
-    id = message.get("tool_call_id", str(uuid.uuid4()))
+    content_str: str = ""
+    if isinstance(message["content"], str):
+        content_str = message["content"]
+    elif isinstance(message["content"], List):
+        content_list = message["content"]
+        for content in content_list:
+            if content["type"] == "text":
+                content_str += content["text"]
+    message.get("name", "")
+    id = str(message.get("tool_call_id", str(uuid.uuid4())))
 
-    tool_result_content_block = BedrockToolResultContentBlock(text=content)
+    tool_result_content_block = BedrockToolResultContentBlock(text=content_str)
     tool_result = BedrockToolResultBlock(
         content=[tool_result_content_block],
         toolUseId=id,
@@ -2319,17 +2383,40 @@ def _convert_to_bedrock_tool_call_result(
     return content_block
 
 
+def _insert_assistant_continue_message(
+    messages: List[BedrockMessageBlock],
+    assistant_continue_message: Optional[str] = None,
+) -> List[BedrockMessageBlock]:
+    """
+    Add dummy message between user/tool result blocks.
+
+    Conversation blocks and tool result blocks cannot be provided in the same turn. Issue: https://github.com/BerriAI/litellm/issues/6053
+    """
+    if assistant_continue_message is not None:
+        messages.append(
+            BedrockMessageBlock(
+                role="assistant",
+                content=[BedrockContentBlock(text=assistant_continue_message)],
+            )
+        )
+    elif litellm.modify_params:
+        messages.append(BedrockMessageBlock(**DEFAULT_ASSISTANT_CONTINUE_MESSAGE))  # type: ignore
+    return messages
+
+
 def _bedrock_converse_messages_pt(
     messages: List,
     model: str,
     llm_provider: str,
     user_continue_message: Optional[dict] = None,
+    assistant_continue_message: Optional[str] = None,
 ) -> List[BedrockMessageBlock]:
     """
     Converts given messages from OpenAI format to Bedrock format
 
     - Roles must alternate b/w 'user' and 'model' (same as anthropic -> merge consecutive roles)
     - Please ensure that function response turn comes immediately after a function call turn
+    - Conversation blocks and tool result blocks cannot be provided in the same turn. Issue: https://github.com/BerriAI/litellm/issues/6053
     """
 
     contents: List[BedrockMessageBlock] = []
@@ -2373,15 +2460,57 @@ def _bedrock_converse_messages_pt(
                 user_content.append(_part)
 
             msg_i += 1
+        if user_content:
+            if len(contents) > 0 and contents[-1]["role"] == "user":
+                if (
+                    assistant_continue_message is not None
+                    or litellm.modify_params is True
+                ):
+                    # if last message was a 'user' message, then add a dummy assistant message (bedrock requires alternating roles)
+                    contents = _insert_assistant_continue_message(
+                        messages=contents,
+                        assistant_continue_message=assistant_continue_message,
+                    )
+                    contents.append(
+                        BedrockMessageBlock(role="user", content=user_content)
+                    )
+                else:
+                    verbose_logger.warning(
+                        "Potential consecutive user/tool blocks. Trying to merge. If error occurs, please set a 'assistant_continue_message' or set 'modify_params=True' to insert a dummy assistant message for bedrock calls."
+                    )
+                    contents[-1]["content"].extend(user_content)
+            else:
+                contents.append(BedrockMessageBlock(role="user", content=user_content))
 
         ## MERGE CONSECUTIVE TOOL CALL MESSAGES ##
+        tool_content: List[BedrockContentBlock] = []
         while msg_i < len(messages) and messages[msg_i]["role"] == "tool":
             tool_call_result = _convert_to_bedrock_tool_call_result(messages[msg_i])
 
-            user_content.append(tool_call_result)
+            tool_content.append(tool_call_result)
             msg_i += 1
-        if user_content:
-            contents.append(BedrockMessageBlock(role="user", content=user_content))
+        if tool_content:
+            # if last message was a 'user' message, then add a blank assistant message (bedrock requires alternating roles)
+            if len(contents) > 0 and contents[-1]["role"] == "user":
+                if (
+                    assistant_continue_message is not None
+                    or litellm.modify_params is True
+                ):
+                    # if last message was a 'user' message, then add a dummy assistant message (bedrock requires alternating roles)
+                    contents = _insert_assistant_continue_message(
+                        messages=contents,
+                        assistant_continue_message=assistant_continue_message,
+                    )
+                    contents.append(
+                        BedrockMessageBlock(role="user", content=tool_content)
+                    )
+                else:
+                    verbose_logger.warning(
+                        "Potential consecutive user/tool blocks. Trying to merge. If error occurs, please set a 'assistant_continue_message' or set 'modify_params=True' to insert a dummy assistant message for bedrock calls."
+                    )
+                    contents[-1]["content"].extend(tool_content)
+            else:
+                contents.append(BedrockMessageBlock(role="user", content=tool_content))
         assistant_content: List[BedrockContentBlock] = []
         ## MERGE CONSECUTIVE ASSISTANT CONTENT ##
         while msg_i < len(messages) and messages[msg_i]["role"] == "assistant":
@@ -2519,7 +2648,9 @@ def _bedrock_tools_pt(tools: List) -> List[BedrockToolBlock]:
     """
     tool_block_list: List[BedrockToolBlock] = []
     for tool in tools:
-        parameters = tool.get("function", {}).get("parameters", None)
+        parameters = tool.get("function", {}).get(
+            "parameters", {"type": "object", "properties": {}}
+        )
         name = tool.get("function", {}).get("name", "")
 
         # related issue: https://github.com/BerriAI/litellm/issues/5007
@@ -2550,7 +2681,7 @@ def function_call_prompt(messages: list, functions: list):
             message["content"] += f""" {function_prompt}"""
             function_added_to_prompt = True
 
-    if function_added_to_prompt == False:
+    if function_added_to_prompt is False:
         messages.append({"role": "system", "content": f"""{function_prompt}"""})
 
     return messages
@@ -2608,7 +2739,7 @@ def custom_prompt(
     final_prompt_value: str = "",
     bos_token: str = "",
     eos_token: str = "",
-):
+) -> str:
     prompt = bos_token + initial_prompt_value
     bos_open = True
     ## a bos token is at the start of a system / human message
@@ -2667,11 +2798,6 @@ def prompt_factory(
         )
     elif custom_llm_provider == "anthropic_xml":
         return anthropic_messages_pt_xml(messages=messages)
-    elif custom_llm_provider == "together_ai":
-        prompt_format, chat_template = get_model_info(token=api_key, model=model)
-        return format_prompt_togetherai(
-            messages=messages, prompt_format=prompt_format, chat_template=chat_template
-        )
     elif custom_llm_provider == "gemini":
         if (
             model == "gemini-pro-vision"
@@ -2785,7 +2911,7 @@ def prompt_factory(
             )
         else:
             return hf_chat_template(original_model_name, messages)
-    except Exception as e:
+    except Exception:
         return default_pt(
             messages=messages
         )  # default that covers Bloom, T-5, any non-chat tuned model (e.g. base Llama2)

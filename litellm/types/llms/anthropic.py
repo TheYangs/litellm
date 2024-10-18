@@ -3,6 +3,8 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 from pydantic import BaseModel, validator
 from typing_extensions import Literal, Required, TypedDict
 
+from .openai import ChatCompletionCachedContent
+
 
 class AnthropicMessagesToolChoice(TypedDict, total=False):
     type: Required[Literal["auto", "any", "tool"]]
@@ -16,13 +18,13 @@ class AnthropicMessagesTool(TypedDict, total=False):
 
 
 class AnthropicMessagesTextParam(TypedDict, total=False):
-    type: Literal["text"]
-    text: str
-    cache_control: Optional[dict]
+    type: Required[Literal["text"]]
+    text: Required[str]
+    cache_control: Optional[Union[dict, ChatCompletionCachedContent]]
 
 
 class AnthropicMessagesToolUseParam(TypedDict):
-    type: Literal["tool_use"]
+    type: Required[Literal["tool_use"]]
     id: str
     name: str
     input: dict
@@ -56,9 +58,9 @@ class AnthropicImageParamSource(TypedDict):
 
 
 class AnthropicMessagesImageParam(TypedDict, total=False):
-    type: Literal["image"]
-    source: AnthropicImageParamSource
-    cache_control: Optional[dict]
+    type: Required[Literal["image"]]
+    source: Required[AnthropicImageParamSource]
+    cache_control: Optional[Union[dict, ChatCompletionCachedContent]]
 
 
 class AnthropicMessagesToolResultContent(TypedDict):
@@ -97,19 +99,16 @@ class AnthropicMetadata(TypedDict, total=False):
 class AnthropicSystemMessageContent(TypedDict, total=False):
     type: str
     text: str
-    cache_control: Optional[dict]
+    cache_control: Optional[Union[dict, ChatCompletionCachedContent]]
 
 
-class AnthropicMessagesRequest(TypedDict, total=False):
-    model: Required[str]
-    messages: Required[
-        List[
-            Union[
-                AnthropicMessagesUserMessageParam,
-                AnthopicMessagesAssistantMessageParam,
-            ]
-        ]
-    ]
+AllAnthropicMessageValues = Union[
+    AnthropicMessagesUserMessageParam, AnthopicMessagesAssistantMessageParam
+]
+
+
+class AnthropicMessageRequestBase(TypedDict, total=False):
+    messages: Required[List[AllAnthropicMessageValues]]
     max_tokens: Required[int]
     metadata: AnthropicMetadata
     stop_sequences: List[str]
@@ -121,6 +120,9 @@ class AnthropicMessagesRequest(TypedDict, total=False):
     top_k: int
     top_p: float
 
+
+class AnthropicMessagesRequest(AnthropicMessageRequestBase, total=False):
+    model: Required[str]
     # litellm param - used for tracking litellm proxy metadata in the request
     litellm_metadata: dict
 
@@ -289,9 +291,9 @@ class AnthropicResponse(BaseModel):
     """Billing and rate-limit usage."""
 
 
-class AnthropicChatCompletionUsageBlock(TypedDict, total=False):
-    prompt_tokens: Required[int]
-    completion_tokens: Required[int]
-    total_tokens: Required[int]
+from .openai import ChatCompletionUsageBlock
+
+
+class AnthropicChatCompletionUsageBlock(ChatCompletionUsageBlock, total=False):
     cache_creation_input_tokens: int
     cache_read_input_tokens: int

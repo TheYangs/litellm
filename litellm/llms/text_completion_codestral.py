@@ -17,6 +17,7 @@ import requests  # type: ignore
 import litellm
 from litellm import verbose_logger
 from litellm.litellm_core_utils.core_helpers import map_finish_reason
+from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLogging
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.types.llms.databricks import GenericStreamingChunk
 from litellm.utils import (
@@ -141,6 +142,7 @@ class MistralTextCompletionConfig:
             "temperature",
             "top_p",
             "max_tokens",
+            "max_completion_tokens",
             "stream",
             "seed",
             "stop",
@@ -154,9 +156,9 @@ class MistralTextCompletionConfig:
                 optional_params["temperature"] = value
             if param == "top_p":
                 optional_params["top_p"] = value
-            if param == "max_tokens":
+            if param == "max_tokens" or param == "max_completion_tokens":
                 optional_params["max_tokens"] = value
-            if param == "stream" and value == True:
+            if param == "stream" and value is True:
                 optional_params["stream"] = value
             if param == "stop":
                 optional_params["stop"] = value
@@ -248,7 +250,7 @@ class CodestralTextCompletion(BaseLLM):
         response: Union[requests.Response, httpx.Response],
         model_response: TextCompletionResponse,
         stream: bool,
-        logging_obj: litellm.litellm_core_utils.litellm_logging.Logging,
+        logging_obj: LiteLLMLogging,
         optional_params: dict,
         api_key: str,
         data: Union[dict, str],
@@ -272,7 +274,7 @@ class CodestralTextCompletion(BaseLLM):
             )
         try:
             completion_response = response.json()
-        except:
+        except Exception:
             raise TextCompletionCodestralError(message=response.text, status_code=422)
 
         _original_choices = completion_response.get("choices", [])
@@ -491,14 +493,9 @@ class CodestralTextCompletion(BaseLLM):
                 message="HTTPStatusError - {}".format(e.response.text),
             )
         except Exception as e:
-            verbose_logger.exception(
-                "litellm.llms.text_completion_codestral.py::async_completion() - Exception occurred - {}".format(
-                    str(e)
-                )
-            )
             raise TextCompletionCodestralError(
                 status_code=500, message="{}".format(str(e))
-            )
+            )  # don't use verbose_logger.exception, if exception is raised
         return self.process_text_completion_response(
             model=model,
             response=response,

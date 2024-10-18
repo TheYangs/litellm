@@ -2,7 +2,7 @@ import Image from '@theme/IdealImage';
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-# 🔥 Load Balancing, Fallbacks, Retries, Timeouts
+# Fallbacks, Load Balancing, Retries
 
 - Quick Start [load balancing](#test---load-balancing)
 - Quick Start [client side fallbacks](#test---client-side-fallbacks)
@@ -31,7 +31,9 @@ model_list:
       api_base: https://openai-france-1234.openai.azure.com/
       api_key: <your-azure-api-key>
       rpm: 1440
-routing_strategy: simple-shuffle # Literal["simple-shuffle", "least-busy", "usage-based-routing","latency-based-routing"], default="simple-shuffle"
+
+router_settings:
+  routing_strategy: simple-shuffle # Literal["simple-shuffle", "least-busy", "usage-based-routing","latency-based-routing"], default="simple-shuffle"
   model_group_alias: {"gpt-4": "gpt-3.5-turbo"} # all requests with `gpt-4` will be routed to models with `gpt-3.5-turbo`
   num_retries: 2
   timeout: 30                                  # 30 seconds
@@ -84,8 +86,6 @@ print(response)
 </TabItem>
 
 <TabItem value="Curl" label="Curl Request">
-
-Pass `metadata` as part of the request body
 
 ```shell
 curl --location 'http://0.0.0.0:4000/chat/completions' \
@@ -699,3 +699,53 @@ print(response)
 ```
 </TabItem>
 </Tabs>
+
+### Setting Fallbacks for Wildcard Models
+
+You can set fallbacks for wildcard models (e.g. `azure/*`) in your config file.
+
+1. Setup config
+```yaml
+model_list:
+  - model_name: "gpt-4o"
+    litellm_params:
+      model: "openai/gpt-4o"
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: "azure/*"
+    litellm_params:
+      model: "azure/*"
+      api_key: os.environ/AZURE_API_KEY
+      api_base: os.environ/AZURE_API_BASE
+
+litellm_settings:
+  fallbacks: [{"gpt-4o": ["azure/gpt-4o"]}]
+```
+
+2. Start Proxy
+```bash
+litellm --config /path/to/config.yaml
+```
+
+3. Test it!
+
+```bash
+curl -L -X POST 'http://0.0.0.0:4000/v1/chat/completions' \
+-H 'Content-Type: application/json' \
+-H 'Authorization: Bearer sk-1234' \
+-d '{
+    "model": "gpt-4o",
+    "messages": [
+      {
+        "role": "user",
+        "content": [    
+          {
+            "type": "text",
+            "text": "what color is red"
+          }
+        ]
+      }
+    ],
+    "max_tokens": 300,
+    "mock_testing_fallbacks": true
+}'
+```

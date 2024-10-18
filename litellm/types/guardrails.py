@@ -19,6 +19,15 @@ litellm_settings:
 """
 
 
+class SupportedGuardrailIntegrations(Enum):
+    APORIA = "aporia"
+    BEDROCK = "bedrock"
+    GURDRAILS_AI = "guardrails_ai"
+    LAKERA = "lakera"
+    PRESIDIO = "presidio"
+    HIDE_SECRETS = "hide-secrets"
+
+
 class Role(Enum):
     SYSTEM = "system"
     ASSISTANT = "assistant"
@@ -71,7 +80,7 @@ class LakeraCategoryThresholds(TypedDict, total=False):
     jailbreak: float
 
 
-class LitellmParams(TypedDict, total=False):
+class LitellmParams(TypedDict):
     guardrail: str
     mode: str
     api_key: str
@@ -83,6 +92,17 @@ class LitellmParams(TypedDict, total=False):
     # Bedrock specific params
     guardrailIdentifier: Optional[str]
     guardrailVersion: Optional[str]
+
+    # Presidio params
+    output_parse_pii: Optional[bool]
+    presidio_ad_hoc_recognizers: Optional[str]
+    mock_redacted_text: Optional[dict]
+
+    # hide secrets params
+    detect_secrets_config: Optional[dict]
+
+    # guardrails ai params
+    guard_name: Optional[str]
 
 
 class Guardrail(TypedDict):
@@ -98,6 +118,7 @@ class GuardrailEventHooks(str, Enum):
     pre_call = "pre_call"
     post_call = "post_call"
     during_call = "during_call"
+    logging_only = "logging_only"
 
 
 class BedrockTextContent(TypedDict, total=False):

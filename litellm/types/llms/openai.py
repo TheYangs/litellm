@@ -1,16 +1,5 @@
 from os import PathLike
-from typing import (
-    IO,
-    Any,
-    BinaryIO,
-    Iterable,
-    List,
-    Literal,
-    Mapping,
-    Optional,
-    Tuple,
-    Union,
-)
+from typing import IO, Any, Iterable, List, Literal, Mapping, Optional, Tuple, Union
 
 from openai._legacy_response import HttpxBinaryResponseContent
 from openai.lib.streaming._assistants import (
@@ -20,7 +9,7 @@ from openai.lib.streaming._assistants import (
     AsyncAssistantStreamManager,
 )
 from openai.pagination import AsyncCursorPage, SyncCursorPage
-from openai.types import Batch, FileObject
+from openai.types import Batch, EmbeddingCreateParams, FileObject
 from openai.types.beta.assistant import Assistant
 from openai.types.beta.assistant_tool_param import AssistantToolParam
 from openai.types.beta.thread_create_params import (
@@ -351,40 +340,64 @@ class ChatCompletionImageUrlObject(TypedDict, total=False):
 
 class ChatCompletionImageObject(TypedDict):
     type: Literal["image_url"]
-    image_url: ChatCompletionImageUrlObject
+    image_url: Union[str, ChatCompletionImageUrlObject]
 
 
-class ChatCompletionUserMessage(TypedDict):
+OpenAIMessageContent = Union[
+    str, Iterable[Union[ChatCompletionTextObject, ChatCompletionImageObject]]
+]
+
+# The prompt(s) to generate completions for, encoded as a string, array of strings, array of tokens, or array of token arrays.
+AllPromptValues = Union[str, List[str], Iterable[int], Iterable[Iterable[int]], None]
+
+
+class OpenAIChatCompletionUserMessage(TypedDict):
     role: Literal["user"]
-    content: Union[
-        str, Iterable[Union[ChatCompletionTextObject, ChatCompletionImageObject]]
-    ]
+    content: OpenAIMessageContent
 
 
-class ChatCompletionAssistantMessage(TypedDict, total=False):
+class OpenAITextCompletionUserMessage(TypedDict):
+    role: Literal["user"]
+    content: AllPromptValues
+
+
+class ChatCompletionUserMessage(OpenAIChatCompletionUserMessage, total=False):
+    cache_control: ChatCompletionCachedContent
+
+
+class OpenAIChatCompletionAssistantMessage(TypedDict, total=False):
     role: Required[Literal["assistant"]]
-    content: Optional[str]
+    content: Optional[Union[str, Iterable[ChatCompletionTextObject]]]
     name: Optional[str]
     tool_calls: Optional[List[ChatCompletionAssistantToolCall]]
     function_call: Optional[ChatCompletionToolCallFunctionChunk]
 
 
+class ChatCompletionAssistantMessage(OpenAIChatCompletionAssistantMessage, total=False):
+    cache_control: ChatCompletionCachedContent
+
+
 class ChatCompletionToolMessage(TypedDict):
     role: Literal["tool"]
-    content: str
+    content: Union[str, Iterable[ChatCompletionTextObject]]
     tool_call_id: str
 
 
 class ChatCompletionFunctionMessage(TypedDict):
     role: Literal["function"]
-    content: Optional[str]
+    content: Optional[Union[str, Iterable[ChatCompletionTextObject]]]
     name: str
+    tool_call_id: Optional[str]
 
 
-class ChatCompletionSystemMessage(TypedDict, total=False):
+class OpenAIChatCompletionSystemMessage(TypedDict, total=False):
     role: Required[Literal["system"]]
     content: Required[Union[str, List]]
     name: str
+
+
+class ChatCompletionSystemMessage(OpenAIChatCompletionSystemMessage, total=False):
+    cache_control: ChatCompletionCachedContent
 
 
 AllMessageValues = Union[

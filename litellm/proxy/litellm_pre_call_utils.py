@@ -1,16 +1,21 @@
 import copy
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 
 from fastapi import Request
+from starlette.datastructures import Headers
 
 import litellm
 from litellm._logging import verbose_logger, verbose_proxy_logger
 from litellm.proxy._types import (
     AddTeamCallback,
     CommonProxyErrors,
+    LitellmDataForBackendLLMCall,
+    LiteLLMRoutes,
+    SpecialHeaders,
     TeamCallbackMetadata,
     UserAPIKeyAuth,
 )
+from litellm.proxy.auth.auth_utils import get_request_route
 from litellm.types.utils import SupportedCacheControls
 
 if TYPE_CHECKING:
@@ -86,16 +91,17 @@ def convert_key_logging_metadata_to_callback(
             team_callback_settings_obj.success_callback = []
         if team_callback_settings_obj.failure_callback is None:
             team_callback_settings_obj.failure_callback = []
+
         if data.callback_name not in team_callback_settings_obj.success_callback:
             team_callback_settings_obj.success_callback.append(data.callback_name)
 
-        if data.callback_name in team_callback_settings_obj.failure_callback:
+        if data.callback_name not in team_callback_settings_obj.failure_callback:
             team_callback_settings_obj.failure_callback.append(data.callback_name)
 
     for var, value in data.callback_vars.items():
         if team_callback_settings_obj.callback_vars is None:
             team_callback_settings_obj.callback_vars = {}
-        team_callback_settings_obj.callback_vars[var] = (
+        team_callback_settings_obj.callback_vars[var] = str(
             litellm.utils.get_secret(value, default_value=value) or value
         )
 
@@ -106,7 +112,16 @@ def _get_dynamic_logging_metadata(
     user_api_key_dict: UserAPIKeyAuth,
 ) -> Optional[TeamCallbackMetadata]:
     callback_settings_obj: Optional[TeamCallbackMetadata] = None
-    if user_api_key_dict.team_metadata is not None:
+    if (
+        user_api_key_dict.metadata is not None
+        and "logging" in user_api_key_dict.metadata
+    ):
+        for item in user_api_key_dict.metadata["logging"]:
+            callback_settings_obj = convert_key_logging_metadata_to_callback(
+                data=AddTeamCallback(**item),
+                team_callback_settings_obj=callback_settings_obj,
+            )
+    elif user_api_key_dict.team_metadata is not None:
         team_metadata = user_api_key_dict.team_metadata
         if "callback_settings" in team_metadata:
             callback_settings = team_metadata.get("callback_settings", None) or {}
@@ -123,16 +138,77 @@ def _get_dynamic_logging_metadata(
             }
             }
             """
-    elif (
-        user_api_key_dict.metadata is not None
-        and "logging" in user_api_key_dict.metadata
-    ):
-        for item in user_api_key_dict.metadata["logging"]:
-            callback_settings_obj = convert_key_logging_metadata_to_callback(
-                data=AddTeamCallback(**item),
-                team_callback_settings_obj=callback_settings_obj,
-            )
+
     return callback_settings_obj
+
+
+def clean_headers(
+    headers: Headers, litellm_key_header_name: Optional[str] = None
+) -> dict:
+    """
+    Removes litellm api key from headers
+    """
+    special_headers = [v.value.lower() for v in SpecialHeaders._member_map_.values()]
+    special_headers = special_headers
+    if litellm_key_header_name is not None:
+        special_headers.append(litellm_key_header_name.lower())
+    clean_headers = {}
+    for header, value in headers.items():
+        if header.lower() not in special_headers:
+            clean_headers[header] = value
+    return clean_headers
+
+
+def get_forwardable_headers(
+    headers: Union[Headers, dict],
+):
+    """
+    Get the headers that should be forwarded to the LLM Provider.
+
+    Looks for any `x-` headers and sends them to the LLM Provider.
+    """
+    forwarded_headers = {}
+    for header, value in headers.items():
+        if header.lower().startswith("x-") and not header.lower().startswith(
+            "x-stainless"
+        ):  # causes openai sdk to fail
+            forwarded_headers[header] = value
+
+    return forwarded_headers
+
+
+def get_openai_org_id_from_headers(
+    headers: dict, general_settings: Optional[Dict] = None
+) -> Optional[str]:
+    """
+    Get the OpenAI Org ID from the headers.
+    """
+    if (
+        general_settings is not None
+        and general_settings.get("forward_openai_org_id") is not True
+    ):
+        return None
+    for header, value in headers.items():
+        if header.lower() == "openai-organization":
+            return value
+    return None
+
+
+def add_litellm_data_for_backend_llm_call(
+    headers: dict, general_settings: Optional[Dict[str, Any]] = None
+) -> LitellmDataForBackendLLMCall:
+    """
+    - Adds forwardable headers
+    - Adds org id
+    """
+    data = LitellmDataForBackendLLMCall()
+    _headers = get_forwardable_headers(headers)
+    if _headers != {}:
+        data["headers"] = _headers
+    _organization = get_openai_org_id_from_headers(headers, general_settings)
+    if _organization is not None:
+        data["organization"] = _organization
+    return data
 
 
 async def add_litellm_data_to_request(
@@ -161,7 +237,16 @@ async def add_litellm_data_to_request(
 
     safe_add_api_version_from_query_params(data, request)
 
-    _headers = dict(request.headers)
+    _headers = clean_headers(
+        request.headers,
+        litellm_key_header_name=(
+            general_settings.get("litellm_key_header_name")
+            if general_settings is not None
+            else None
+        ),
+    )
+
+    data.update(add_litellm_data_for_backend_llm_call(_headers, general_settings))
 
     # Include original request and headers in the data
     data["proxy_server_request"] = {
@@ -202,6 +287,13 @@ async def add_litellm_data_to_request(
 
     if _metadata_variable_name not in data:
         data[_metadata_variable_name] = {}
+
+    # We want to log the "metadata" from the client side request. Avoid circular reference by not directly assigning metadata to itself
+    if "metadata" in data and data["metadata"] is not None:
+        data[_metadata_variable_name]["requester_metadata"] = copy.deepcopy(
+            data["metadata"]
+        )
+
     data[_metadata_variable_name]["user_api_key"] = user_api_key_dict.api_key
     data[_metadata_variable_name]["user_api_key_alias"] = getattr(
         user_api_key_dict, "key_alias", None
@@ -342,15 +434,8 @@ async def add_litellm_data_to_request(
 
     # Enterprise Only - Check if using tag based routing
     if llm_router and llm_router.enable_tag_filtering is True:
-        if premium_user is not True:
-            verbose_proxy_logger.warning(
-                "router.enable_tag_filtering is on %s \n switched off router.enable_tag_filtering",
-                CommonProxyErrors.not_premium_user.value,
-            )
-            llm_router.enable_tag_filtering = False
-        else:
-            if "tags" in data:
-                data[_metadata_variable_name]["tags"] = data["tags"]
+        if "tags" in data:
+            data[_metadata_variable_name]["tags"] = data["tags"]
 
     ### TEAM-SPECIFIC PARAMS ###
     if user_api_key_dict.team_id is not None:
@@ -387,6 +472,9 @@ async def add_litellm_data_to_request(
         user_api_key_dict=user_api_key_dict,
     )
 
+    verbose_proxy_logger.debug(
+        f"[PROXY]returned data from litellm_pre_call_utils: {data}"
+    )
     return data
 
 
@@ -419,6 +507,10 @@ def move_guardrails_to_metadata(
     if "guardrails" in data:
         data[_metadata_variable_name]["guardrails"] = data["guardrails"]
         del data["guardrails"]
+
+    if "guardrail_config" in data:
+        data[_metadata_variable_name]["guardrail_config"] = data["guardrail_config"]
+        del data["guardrail_config"]
 
 
 def add_provider_specific_headers_to_request(
