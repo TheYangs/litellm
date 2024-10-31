@@ -3,13 +3,14 @@
 import os
 import traceback
 from datetime import datetime as datetimeObj
-from typing import Any, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, Tuple, Union
 
 import dotenv
 from pydantic import BaseModel
 
 from litellm.caching.caching import DualCache
 from litellm.proxy._types import UserAPIKeyAuth
+from litellm.types.integrations.argilla import ArgillaItem
 from litellm.types.llms.openai import ChatCompletionRequest
 from litellm.types.services import ServiceLoggerPayload
 from litellm.types.utils import (
@@ -17,7 +18,15 @@ from litellm.types.utils import (
     EmbeddingResponse,
     ImageResponse,
     ModelResponse,
+    StandardLoggingPayload,
 )
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span as _Span
+
+    Span = _Span
+else:
+    Span = Any
 
 
 class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callback#callback-class
@@ -60,7 +69,9 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
     Allows usage-based-routing-v2 to run pre-call rpm checks within the picked deployment's semaphore (concurrency-safe tpm/rpm checks).
     """
 
-    async def async_pre_call_check(self, deployment: dict) -> Optional[dict]:
+    async def async_pre_call_check(
+        self, deployment: dict, parent_otel_span: Optional[Span]
+    ) -> Optional[dict]:
         pass
 
     def pre_call_check(self, deployment: dict) -> Optional[dict]:
@@ -107,6 +118,20 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
         Translates the streaming chunk, from the OpenAI format to the custom format.
         """
         pass
+
+    ### DATASET HOOKS #### - currently only used for Argilla
+
+    async def async_dataset_hook(
+        self,
+        logged_item: ArgillaItem,
+        standard_logging_payload: Optional[StandardLoggingPayload],
+    ) -> Optional[ArgillaItem]:
+        """
+        - Decide if the result should be logged to Argilla.
+        - Modify the result before logging to Argilla.
+        - Return None if the result should not be logged to Argilla.
+        """
+        raise NotImplementedError("async_dataset_hook not implemented")
 
     #### CALL HOOKS - proxy only ####
     """

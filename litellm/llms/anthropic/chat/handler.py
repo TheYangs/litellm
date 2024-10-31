@@ -29,6 +29,7 @@ from litellm.llms.custom_httpx.http_handler import (
     get_async_httpx_client,
 )
 from litellm.types.llms.anthropic import (
+    AllAnthropicToolsValues,
     AnthropicChatCompletionUsageBlock,
     ContentBlockDelta,
     ContentBlockStart,
@@ -43,7 +44,7 @@ from litellm.types.llms.openai import (
     ChatCompletionToolCallFunctionChunk,
     ChatCompletionUsageBlock,
 )
-from litellm.types.utils import GenericStreamingChunk, PromptTokensDetails
+from litellm.types.utils import GenericStreamingChunk, PromptTokensDetailsWrapper
 from litellm.utils import CustomStreamWrapper, ModelResponse, Usage
 
 from ...base import BaseLLM
@@ -53,9 +54,14 @@ from .transformation import AnthropicConfig
 
 # makes headers for API call
 def validate_environment(
-    api_key, user_headers, model, messages: List[AllMessageValues]
+    api_key,
+    user_headers,
+    model,
+    messages: List[AllMessageValues],
+    tools: Optional[List[AllAnthropicToolsValues]],
+    anthropic_version: Optional[str] = None,
 ):
-    cache_headers = {}
+
     if api_key is None:
         raise litellm.AuthenticationError(
             message="Missing Anthropic API Key - A call is being made to anthropic but no key is set either in the environment variables or via params. Please set `ANTHROPIC_API_KEY` in your environment vars",
@@ -63,16 +69,15 @@ def validate_environment(
             model=model,
         )
 
-    if AnthropicConfig().is_cache_control_set(messages=messages):
-        cache_headers = AnthropicConfig().get_cache_control_headers()
-    headers = {
-        "accept": "application/json",
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-        "x-api-key": api_key,
-    }
+    prompt_caching_set = AnthropicConfig().is_cache_control_set(messages=messages)
+    computer_tool_used = AnthropicConfig().is_computer_tool_used(tools=tools)
 
-    headers.update(cache_headers)
+    headers = AnthropicConfig().get_anthropic_headers(
+        anthropic_version=anthropic_version,
+        computer_tool_used=computer_tool_used,
+        prompt_caching_set=prompt_caching_set,
+        api_key=api_key,
+    )
 
     if user_headers is not None and isinstance(user_headers, dict):
         headers = {**headers, **user_headers}
@@ -294,7 +299,7 @@ class AnthropicChatCompletion(BaseLLM):
             cache_read_input_tokens = _usage["cache_read_input_tokens"]
             prompt_tokens += cache_read_input_tokens
 
-        prompt_tokens_details = PromptTokensDetails(
+        prompt_tokens_details = PromptTokensDetailsWrapper(
             cached_tokens=cache_read_input_tokens
         )
         total_tokens = prompt_tokens + completion_tokens
@@ -398,6 +403,8 @@ class AnthropicChatCompletion(BaseLLM):
             error_response = getattr(e, "response", None)
             if error_headers is None and error_response:
                 error_headers = getattr(error_response, "headers", None)
+            if error_response and hasattr(error_response, "text"):
+                error_text = getattr(error_response, "text", error_text)
             raise AnthropicError(
                 message=error_text,
                 status_code=status_code,
@@ -438,7 +445,13 @@ class AnthropicChatCompletion(BaseLLM):
         headers={},
         client=None,
     ):
-        headers = validate_environment(api_key, headers, model, messages=messages)
+        headers = validate_environment(
+            api_key,
+            headers,
+            model,
+            messages=messages,
+            tools=optional_params.get("tools"),
+        )
         _is_function_call = False
         messages = copy.deepcopy(messages)
         optional_params = copy.deepcopy(optional_params)

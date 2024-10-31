@@ -34,6 +34,9 @@ from litellm import (
 from litellm.adapters.anthropic_adapter import anthropic_adapter
 from litellm.types.llms.anthropic import AnthropicResponse
 
+from litellm.llms.anthropic.common_utils import process_anthropic_headers
+from httpx import Headers
+
 
 def test_anthropic_completion_messages_translation():
     messages = [{"role": "user", "content": "Hey, how's it going?"}]
@@ -457,3 +460,165 @@ def test_anthropic_tool_calling_translation():
 
     assert len(translated_params["messages"]) > 0
     assert translated_params["messages"][0]["role"] == "user"
+
+
+def test_process_anthropic_headers_empty():
+    result = process_anthropic_headers({})
+    assert result == {}, "Expected empty dictionary for no input"
+
+
+def test_process_anthropic_headers_with_all_headers():
+    input_headers = Headers(
+        {
+            "anthropic-ratelimit-requests-limit": "100",
+            "anthropic-ratelimit-requests-remaining": "90",
+            "anthropic-ratelimit-tokens-limit": "10000",
+            "anthropic-ratelimit-tokens-remaining": "9000",
+            "other-header": "value",
+        }
+    )
+
+    expected_output = {
+        "x-ratelimit-limit-requests": "100",
+        "x-ratelimit-remaining-requests": "90",
+        "x-ratelimit-limit-tokens": "10000",
+        "x-ratelimit-remaining-tokens": "9000",
+        "llm_provider-anthropic-ratelimit-requests-limit": "100",
+        "llm_provider-anthropic-ratelimit-requests-remaining": "90",
+        "llm_provider-anthropic-ratelimit-tokens-limit": "10000",
+        "llm_provider-anthropic-ratelimit-tokens-remaining": "9000",
+        "llm_provider-other-header": "value",
+    }
+
+    result = process_anthropic_headers(input_headers)
+    assert result == expected_output, "Unexpected output for all Anthropic headers"
+
+
+def test_process_anthropic_headers_with_partial_headers():
+    input_headers = Headers(
+        {
+            "anthropic-ratelimit-requests-limit": "100",
+            "anthropic-ratelimit-tokens-remaining": "9000",
+            "other-header": "value",
+        }
+    )
+
+    expected_output = {
+        "x-ratelimit-limit-requests": "100",
+        "x-ratelimit-remaining-tokens": "9000",
+        "llm_provider-anthropic-ratelimit-requests-limit": "100",
+        "llm_provider-anthropic-ratelimit-tokens-remaining": "9000",
+        "llm_provider-other-header": "value",
+    }
+
+    result = process_anthropic_headers(input_headers)
+    assert result == expected_output, "Unexpected output for partial Anthropic headers"
+
+
+def test_process_anthropic_headers_with_no_matching_headers():
+    input_headers = Headers(
+        {"unrelated-header-1": "value1", "unrelated-header-2": "value2"}
+    )
+
+    expected_output = {
+        "llm_provider-unrelated-header-1": "value1",
+        "llm_provider-unrelated-header-2": "value2",
+    }
+
+    result = process_anthropic_headers(input_headers)
+    assert result == expected_output, "Unexpected output for non-matching headers"
+
+
+def test_anthropic_computer_tool_use():
+    from litellm import completion
+
+    tools = [
+        {
+            "type": "computer_20241022",
+            "function": {
+                "name": "computer",
+                "parameters": {
+                    "display_height_px": 100,
+                    "display_width_px": 100,
+                    "display_number": 1,
+                },
+            },
+        }
+    ]
+    model = "claude-3-5-sonnet-20241022"
+    messages = [{"role": "user", "content": "Save a picture of a cat to my desktop."}]
+
+    resp = completion(
+        model=model,
+        messages=messages,
+        tools=tools,
+        # headers={"anthropic-beta": "computer-use-2024-10-22"},
+    )
+
+    print(resp)
+
+
+@pytest.mark.parametrize(
+    "computer_tool_used, prompt_caching_set, expected_beta_header",
+    [
+        (True, False, True),
+        (False, True, True),
+        (True, True, True),
+        (False, False, False),
+    ],
+)
+def test_anthropic_beta_header(
+    computer_tool_used, prompt_caching_set, expected_beta_header
+):
+    headers = litellm.AnthropicConfig().get_anthropic_headers(
+        api_key="fake-api-key",
+        computer_tool_used=computer_tool_used,
+        prompt_caching_set=prompt_caching_set,
+    )
+
+    if expected_beta_header:
+        assert "anthropic-beta" in headers
+    else:
+        assert "anthropic-beta" not in headers
+
+
+@pytest.mark.parametrize(
+    "cache_control_location",
+    [
+        "inside_function",
+        "outside_function",
+    ],
+)
+def test_anthropic_tool_helper(cache_control_location):
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "get_current_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "The city and state, e.g. San Francisco, CA",
+                    },
+                    "unit": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                    },
+                },
+                "required": ["location"],
+            },
+        },
+    }
+
+    if cache_control_location == "inside_function":
+        tool["function"]["cache_control"] = {"type": "ephemeral"}
+    else:
+        tool["cache_control"] = {"type": "ephemeral"}
+
+    tool = AnthropicConfig()._map_tool_helper(tool=tool)
+
+    assert tool["cache_control"] == {"type": "ephemeral"}

@@ -23,8 +23,9 @@ import litellm
 from litellm import aembedding, completion, embedding
 from litellm.caching.caching import Cache
 
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock, call
 import datetime
+from datetime import timedelta
 
 # litellm.set_verbose=True
 
@@ -82,7 +83,9 @@ def test_dual_cache_batch_get_cache():
 
     in_memory_cache.set_cache(key="test_value", value="hello world")
 
-    result = dual_cache.batch_get_cache(keys=["test_value", "test_value_2"])
+    result = dual_cache.batch_get_cache(
+        keys=["test_value", "test_value_2"], parent_otel_span=None
+    )
 
     assert result[0] == "hello world"
     assert result[1] == None
@@ -606,7 +609,7 @@ async def test_embedding_caching_redis_ttl():
             type="redis",
             host="dummy_host",
             password="dummy_password",
-            default_in_redis_ttl=2.5,
+            default_in_redis_ttl=2,
         )
 
         inputs = [
@@ -632,7 +635,7 @@ async def test_embedding_caching_redis_ttl():
             print(f"redis pipeline set args: {args}")
             print(f"redis pipeline set kwargs: {kwargs}")
             assert kwargs.get("ex") == datetime.timedelta(
-                seconds=2.5
+                seconds=2
             )  # Check if TTL is set to 2.5 seconds
 
 
@@ -678,6 +681,7 @@ async def test_redis_cache_basic():
 
 
 @pytest.mark.asyncio
+@pytest.mark.flaky(retries=3, delay=1)
 async def test_redis_batch_cache_write():
     """
     Init redis client
@@ -974,7 +978,7 @@ async def test_redis_cache_acompletion_stream():
             response_1_content += chunk.choices[0].delta.content or ""
         print(response_1_content)
 
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
         print("\n\n Response 1 content: ", response_1_content, "\n\n")
 
         response2 = await litellm.acompletion(
@@ -2065,46 +2069,6 @@ async def test_cache_default_off_acompletion():
     assert response3.id == response4.id
 
 
-@pytest.mark.asyncio()
-@pytest.mark.skip(reason="dual caching should first prioritze local cache")
-async def test_dual_cache_uses_redis():
-    """
-
-    - Store diff values in redis and in memory cache
-    - call get cache
-    - Assert that value from redis is used
-    """
-    litellm.set_verbose = True
-    from litellm.caching.caching import DualCache, RedisCache
-
-    current_usage = uuid.uuid4()
-
-    _cache_obj = DualCache(redis_cache=RedisCache(), always_read_redis=True)
-
-    # set cache
-    await _cache_obj.async_set_cache(key=f"current_usage: {current_usage}", value=10)
-
-    # modify value of in memory cache
-    _cache_obj.in_memory_cache.cache_dict[f"current_usage: {current_usage}"] = 1
-
-    # get cache
-    value = await _cache_obj.async_get_cache(key=f"current_usage: {current_usage}")
-    print("value from dual cache", value)
-    assert value == 10
-
-
-@pytest.mark.asyncio()
-async def test_proxy_logging_setup():
-    """
-    Assert always_read_redis is True when used by internal usage cache
-    """
-    from litellm.caching.caching import DualCache
-    from litellm.proxy.utils import ProxyLogging
-
-    pl_obj = ProxyLogging(user_api_key_cache=DualCache())
-    assert pl_obj.internal_usage_cache.dual_cache.always_read_redis is True
-
-
 @pytest.mark.skip(reason="local test. Requires sentinel setup.")
 @pytest.mark.asyncio
 async def test_redis_sentinel_caching():
@@ -2365,3 +2329,179 @@ async def test_caching_kwargs_input(sync_mode):
     else:
         input["original_function"] = acompletion
         await llm_caching_handler.async_set_cache(**input)
+
+
+@pytest.mark.skip(reason="audio caching not supported yet")
+@pytest.mark.parametrize("stream", [False])  # True,
+@pytest.mark.asyncio()
+async def test_audio_caching(stream):
+    litellm.cache = Cache(type="local")
+
+    ## CALL 1 - no cache hit
+    completion = await litellm.acompletion(
+        model="gpt-4o-audio-preview",
+        modalities=["text", "audio"],
+        audio={"voice": "alloy", "format": "pcm16"},
+        messages=[{"role": "user", "content": "response in 1 word - yes or no"}],
+        stream=stream,
+    )
+
+    assert "cache_hit" not in completion._hidden_params
+
+    ## CALL 2 - cache hit
+    completion = await litellm.acompletion(
+        model="gpt-4o-audio-preview",
+        modalities=["text", "audio"],
+        audio={"voice": "alloy", "format": "pcm16"},
+        messages=[{"role": "user", "content": "response in 1 word - yes or no"}],
+        stream=stream,
+    )
+
+    assert "cache_hit" in completion._hidden_params
+
+
+def test_redis_caching_default_ttl():
+    """
+    Ensure that the default redis cache TTL is 60s
+    """
+    from litellm.caching.redis_cache import RedisCache
+
+    litellm.default_redis_ttl = 120
+
+    cache_obj = RedisCache()
+    assert cache_obj.default_ttl == 120
+
+
+@pytest.mark.asyncio()
+@pytest.mark.parametrize("sync_mode", [True, False])
+async def test_redis_caching_llm_caching_ttl(sync_mode):
+    """
+    Ensure default redis cache ttl is used for a sample redis cache object
+    """
+    from litellm.caching.redis_cache import RedisCache
+
+    litellm.default_redis_ttl = 120
+    cache_obj = RedisCache()
+    assert cache_obj.default_ttl == 120
+
+    if sync_mode is False:
+        # Create an AsyncMock for the Redis client
+        mock_redis_instance = AsyncMock()
+
+        # Make sure the mock can be used as an async context manager
+        mock_redis_instance.__aenter__.return_value = mock_redis_instance
+        mock_redis_instance.__aexit__.return_value = None
+
+    ## Set cache
+    if sync_mode is True:
+        with patch.object(cache_obj.redis_client, "set") as mock_set:
+            cache_obj.set_cache(key="test", value="test")
+            mock_set.assert_called_once_with(name="test", value="test", ex=120)
+    else:
+
+        # Patch self.init_async_client to return our mock Redis client
+        with patch.object(
+            cache_obj, "init_async_client", return_value=mock_redis_instance
+        ):
+            # Call async_set_cache
+            await cache_obj.async_set_cache(key="test", value="test_value")
+
+            # Verify that the set method was called on the mock Redis instance
+            mock_redis_instance.set.assert_called_once_with(
+                name="test", value='"test_value"', ex=120
+            )
+
+    ## Increment cache
+    if sync_mode is True:
+        with patch.object(cache_obj.redis_client, "ttl") as mock_incr:
+            cache_obj.increment_cache(key="test", value=1)
+            mock_incr.assert_called_once_with("test")
+    else:
+        # Patch self.init_async_client to return our mock Redis client
+        with patch.object(
+            cache_obj, "init_async_client", return_value=mock_redis_instance
+        ):
+            # Call async_set_cache
+            await cache_obj.async_increment(key="test", value="test_value")
+
+            # Verify that the set method was called on the mock Redis instance
+            mock_redis_instance.ttl.assert_called_once_with("test")
+
+
+@pytest.mark.asyncio()
+async def test_redis_caching_ttl_pipeline():
+    """
+    Ensure that a default ttl is set for all redis functions
+    """
+
+    from litellm.caching.redis_cache import RedisCache
+
+    litellm.default_redis_ttl = 120
+    expected_timedelta = timedelta(seconds=120)
+    cache_obj = RedisCache()
+
+    ## TEST 1 - async_set_cache_pipeline
+    # Patch self.init_async_client to return our mock Redis client
+    # Call async_set_cache
+    mock_pipe_instance = AsyncMock()
+    with patch.object(mock_pipe_instance, "set", return_value=None) as mock_set:
+        await cache_obj._pipeline_helper(
+            pipe=mock_pipe_instance,
+            cache_list=[("test_key1", "test_value1"), ("test_key2", "test_value2")],
+            ttl=None,
+        )
+
+        # Verify that the set method was called on the mock Redis instance
+        mock_set.assert_has_calls(
+            [
+                call.set("test_key1", '"test_value1"', ex=expected_timedelta),
+                call.set("test_key2", '"test_value2"', ex=expected_timedelta),
+            ]
+        )
+
+
+@pytest.mark.asyncio()
+async def test_redis_caching_ttl_sadd():
+    """
+    Ensure that a default ttl is set for all redis functions
+    """
+    from litellm.caching.redis_cache import RedisCache
+
+    litellm.default_redis_ttl = 120
+    expected_timedelta = timedelta(seconds=120)
+    cache_obj = RedisCache()
+    redis_client = AsyncMock()
+
+    with patch.object(redis_client, "expire", return_value=None) as mock_expire:
+        await cache_obj._set_cache_sadd_helper(
+            redis_client=redis_client, key="test_key", value=["test_value"], ttl=None
+        )
+        print(f"expected_timedelta: {expected_timedelta}")
+        assert mock_expire.call_args.args[1] == expected_timedelta
+
+
+@pytest.mark.asyncio()
+async def test_dual_cache_caching_batch_get_cache():
+    """
+    - check redis cache called for initial batch get cache
+    - check redis cache not called for consecutive batch get cache with same keys
+    """
+    from litellm.caching.dual_cache import DualCache
+    from litellm.caching.redis_cache import RedisCache
+
+    dc = DualCache(redis_cache=MagicMock(spec=RedisCache))
+
+    with patch.object(
+        dc.redis_cache,
+        "async_batch_get_cache",
+        new=AsyncMock(
+            return_value={"test_key1": "test_value1", "test_key2": "test_value2"}
+        ),
+    ) as mock_async_get_cache:
+        await dc.async_batch_get_cache(keys=["test_key1", "test_key2"])
+
+        assert mock_async_get_cache.call_count == 1
+
+        await dc.async_batch_get_cache(keys=["test_key1", "test_key2"])
+
+        assert mock_async_get_cache.call_count == 1

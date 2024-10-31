@@ -268,6 +268,7 @@ class SlackAlerting(CustomBatchLogger):
                         SlackAlertingCacheKeys.failed_requests_key.value,
                     ),
                     value=1,
+                    parent_otel_span=None,  # no attached request, this is a background operation
                 )
 
                 return_val += 1
@@ -279,6 +280,7 @@ class SlackAlerting(CustomBatchLogger):
                         deployment_metrics.id, SlackAlertingCacheKeys.latency_key.value
                     ),
                     value=deployment_metrics.latency_per_output_token,
+                    parent_otel_span=None,  # no attached request, this is a background operation
                 )
 
                 return_val += 1
@@ -287,7 +289,7 @@ class SlackAlerting(CustomBatchLogger):
         except Exception:
             return 0
 
-    async def send_daily_reports(self, router) -> bool:
+    async def send_daily_reports(self, router) -> bool:  # noqa: PLR0915
         """
         Send a daily report on:
         - Top 5 deployments with most failed requests
@@ -573,7 +575,7 @@ class SlackAlerting(CustomBatchLogger):
                 ttl=self.alerting_args.budget_alert_ttl,
             )
 
-    async def budget_alerts(
+    async def budget_alerts(  # noqa: PLR0915
         self,
         type: Literal[
             "token_budget",
@@ -1518,7 +1520,8 @@ Model Info:
         report_sent_bool = False
 
         report_sent = await self.internal_usage_cache.async_get_cache(
-            key=SlackAlertingCacheKeys.report_sent_key.value
+            key=SlackAlertingCacheKeys.report_sent_key.value,
+            parent_otel_span=None,
         )  # None | float
 
         current_time = time.time()
