@@ -84,6 +84,11 @@ proxy_config:
       litellm_params:
         model: "*"
         api_key: os.environ/ANTHROPIC_API_KEY
+    # Ollama
+    - model_name: "*" 
+      litellm_params:
+        model: "*"
+        api_base: http://host.docker.internal:11434/api/
     # te be continued...
   general_settings:
     master_key: os.environ/PROXY_MASTER_KEY
