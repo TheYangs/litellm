@@ -87,7 +87,7 @@ proxy_config:
     # Ollama - deepseek-r1
     - model_name: "deepseek-r1" 
       litellm_params:
-        model: "deepseek-r1"
+        model: "ollama/deepseek-r1"
         api_base: http://host.docker.internal:11434/api/
       model_info:
         mode: completion
