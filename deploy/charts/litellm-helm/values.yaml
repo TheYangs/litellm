@@ -88,7 +88,7 @@ proxy_config:
     - model_name: "deepseek-r1" 
       litellm_params:
         model: "ollama/deepseek-r1"
-        api_base: http://host.docker.internal:11434/api/
+        api_base: http://ollama.default.svc.cluster.local:11434/api/
       model_info:
         mode: completion
     # te be continued...
