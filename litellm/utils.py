@@ -71,6 +71,10 @@ from litellm.litellm_core_utils.exception_mapping_utils import (
     exception_type,
     get_error_message,
 )
+from litellm.litellm_core_utils.get_litellm_params import (
+    _get_base_model_from_litellm_call_metadata,
+    get_litellm_params,
+)
 from litellm.litellm_core_utils.get_llm_provider_logic import (
     _is_non_openai_azure_model,
     get_llm_provider,
@@ -318,9 +322,61 @@ def custom_llm_setup():
             litellm._custom_providers.append(custom_llm["provider"])
 
 
+def _add_custom_logger_callback_to_specific_event(
+    callback: str, logging_event: Literal["success", "failure"]
+) -> None:
+    """
+    Add a custom logger callback to the specific event
+    """
+    from litellm import _custom_logger_compatible_callbacks_literal
+    from litellm.litellm_core_utils.litellm_logging import (
+        _init_custom_logger_compatible_class,
+    )
+
+    if callback not in litellm._known_custom_logger_compatible_callbacks:
+        verbose_logger.debug(
+            f"Callback {callback} is not a valid custom logger compatible callback. Known list - {litellm._known_custom_logger_compatible_callbacks}"
+        )
+        return
+
+    callback_class = _init_custom_logger_compatible_class(
+        cast(_custom_logger_compatible_callbacks_literal, callback),
+        internal_usage_cache=None,
+        llm_router=None,
+    )
+
+    # don't double add a callback
+    if callback_class is not None and not any(
+        isinstance(cb, type(callback_class)) for cb in litellm.callbacks  # type: ignore
+    ):
+        if logging_event == "success":
+            litellm.success_callback.append(callback_class)
+            litellm._async_success_callback.append(callback_class)
+            if callback in litellm.success_callback:
+                litellm.success_callback.remove(
+                    callback
+                )  # remove the string from the callback list
+            if callback in litellm._async_success_callback:
+                litellm._async_success_callback.remove(
+                    callback
+                )  # remove the string from the callback list
+        elif logging_event == "failure":
+            litellm.failure_callback.append(callback_class)
+            litellm._async_failure_callback.append(callback_class)
+            if callback in litellm.failure_callback:
+                litellm.failure_callback.remove(
+                    callback
+                )  # remove the string from the callback list
+            if callback in litellm._async_failure_callback:
+                litellm._async_failure_callback.remove(
+                    callback
+                )  # remove the string from the callback list
+
+
 def function_setup(  # noqa: PLR0915
     original_function: str, rules_obj, start_time, *args, **kwargs
 ):  # just run once to check if user wants to send their data anywhere - PostHog/Sentry/Slack/etc.
+
     ### NOTICES ###
     from litellm import Logging as LiteLLMLogging
     from litellm.litellm_core_utils.litellm_logging import set_callbacks
@@ -401,27 +457,11 @@ def function_setup(  # noqa: PLR0915
                     # we only support async dynamo db logging for acompletion/aembedding since that's used on proxy
                     litellm._async_success_callback.append(callback)
                     removed_async_items.append(index)
-                elif callback in litellm._known_custom_logger_compatible_callbacks:
-                    from litellm.litellm_core_utils.litellm_logging import (
-                        _init_custom_logger_compatible_class,
-                    )
-
-                    callback_class = _init_custom_logger_compatible_class(
-                        callback,  # type: ignore
-                        internal_usage_cache=None,
-                        llm_router=None,  # type: ignore
-                    )
-
-                    # don't double add a callback
-                    if callback_class is not None and not any(
-                        isinstance(cb, type(callback_class)) for cb in litellm.callbacks
-                    ):
-                        litellm.callbacks.append(callback_class)  # type: ignore
-                        litellm.input_callback.append(callback_class)  # type: ignore
-                        litellm.success_callback.append(callback_class)  # type: ignore
-                        litellm.failure_callback.append(callback_class)  # type: ignore
-                        litellm._async_success_callback.append(callback_class)  # type: ignore
-                        litellm._async_failure_callback.append(callback_class)  # type: ignore
+                elif (
+                    callback in litellm._known_custom_logger_compatible_callbacks
+                    and isinstance(callback, str)
+                ):
+                    _add_custom_logger_callback_to_specific_event(callback, "success")
 
             # Pop the async items from success_callback in reverse order to avoid index issues
             for index in reversed(removed_async_items):
@@ -633,6 +673,7 @@ def _get_wrapper_num_retries(
     Get the number of retries from the kwargs and the retry policy.
     Used for the wrapper functions.
     """
+
     num_retries = kwargs.get("num_retries", None)
     if num_retries is None:
         num_retries = litellm.num_retries
@@ -646,6 +687,21 @@ def _get_wrapper_num_retries(
             num_retries = retry_policy_num_retries
 
     return num_retries, kwargs
+
+
+def _get_wrapper_timeout(
+    kwargs: Dict[str, Any], exception: Exception
+) -> Optional[Union[float, int, httpx.Timeout]]:
+    """
+    Get the timeout from the kwargs
+    Used for the wrapper functions.
+    """
+
+    timeout = cast(
+        Optional[Union[float, int, httpx.Timeout]], kwargs.get("timeout", None)
+    )
+
+    return timeout
 
 
 def client(original_function):  # noqa: PLR0915
@@ -1207,9 +1263,11 @@ def client(original_function):  # noqa: PLR0915
                 _is_litellm_router_call = "model_group" in kwargs.get(
                     "metadata", {}
                 )  # check if call from litellm.router/proxy
+
                 if (
                     num_retries and not _is_litellm_router_call
                 ):  # only enter this if call is not from litellm router/proxy. router has it's own logic for retrying
+
                     try:
                         litellm.num_retries = (
                             None  # set retries to None to prevent infinite loops
@@ -1230,6 +1288,7 @@ def client(original_function):  # noqa: PLR0915
                     and context_window_fallback_dict
                     and model in context_window_fallback_dict
                 ):
+
                     if len(args) > 0:
                         args[0] = context_window_fallback_dict[model]  # type: ignore
                     else:
@@ -1239,6 +1298,9 @@ def client(original_function):  # noqa: PLR0915
             setattr(
                 e, "num_retries", num_retries
             )  ## IMPORTANT: returns the deployment's num_retries to the router
+
+            timeout = _get_wrapper_timeout(kwargs=kwargs, exception=e)
+            setattr(e, "timeout", timeout)
             raise e
 
     is_coroutine = inspect.iscoroutinefunction(original_function)
@@ -2036,86 +2098,6 @@ def register_model(model_cost: Union[str, dict]):  # noqa: PLR0915
     return model_cost
 
 
-def get_litellm_params(
-    api_key: Optional[str] = None,
-    force_timeout=600,
-    azure=False,
-    logger_fn=None,
-    verbose=False,
-    hugging_face=False,
-    replicate=False,
-    together_ai=False,
-    custom_llm_provider: Optional[str] = None,
-    api_base: Optional[str] = None,
-    litellm_call_id=None,
-    model_alias_map=None,
-    completion_call_id=None,
-    metadata: Optional[dict] = None,
-    model_info=None,
-    proxy_server_request=None,
-    acompletion=None,
-    preset_cache_key=None,
-    no_log=None,
-    input_cost_per_second=None,
-    input_cost_per_token=None,
-    output_cost_per_token=None,
-    output_cost_per_second=None,
-    cooldown_time=None,
-    text_completion=None,
-    azure_ad_token_provider=None,
-    user_continue_message=None,
-    base_model: Optional[str] = None,
-    litellm_trace_id: Optional[str] = None,
-    hf_model_name: Optional[str] = None,
-    custom_prompt_dict: Optional[dict] = None,
-    litellm_metadata: Optional[dict] = None,
-    disable_add_transform_inline_image_block: Optional[bool] = None,
-    drop_params: Optional[bool] = None,
-    prompt_id: Optional[str] = None,
-    prompt_variables: Optional[dict] = None,
-    async_call: Optional[bool] = None,
-    **kwargs,
-) -> dict:
-    litellm_params = {
-        "acompletion": acompletion,
-        "api_key": api_key,
-        "force_timeout": force_timeout,
-        "logger_fn": logger_fn,
-        "verbose": verbose,
-        "custom_llm_provider": custom_llm_provider,
-        "api_base": api_base,
-        "litellm_call_id": litellm_call_id,
-        "model_alias_map": model_alias_map,
-        "completion_call_id": completion_call_id,
-        "metadata": metadata,
-        "model_info": model_info,
-        "proxy_server_request": proxy_server_request,
-        "preset_cache_key": preset_cache_key,
-        "no-log": no_log,
-        "stream_response": {},  # litellm_call_id: ModelResponse Dict
-        "input_cost_per_token": input_cost_per_token,
-        "input_cost_per_second": input_cost_per_second,
-        "output_cost_per_token": output_cost_per_token,
-        "output_cost_per_second": output_cost_per_second,
-        "cooldown_time": cooldown_time,
-        "text_completion": text_completion,
-        "azure_ad_token_provider": azure_ad_token_provider,
-        "user_continue_message": user_continue_message,
-        "base_model": base_model
-        or _get_base_model_from_litellm_call_metadata(metadata=metadata),
-        "litellm_trace_id": litellm_trace_id,
-        "hf_model_name": hf_model_name,
-        "custom_prompt_dict": custom_prompt_dict,
-        "litellm_metadata": litellm_metadata,
-        "disable_add_transform_inline_image_block": disable_add_transform_inline_image_block,
-        "drop_params": drop_params,
-        "prompt_id": prompt_id,
-        "prompt_variables": prompt_variables,
-        "async_call": async_call,
-    }
-    return litellm_params
-
-
 def _should_drop_param(k, additional_drop_params) -> bool:
     if (
         additional_drop_params is not None
@@ -2602,25 +2584,6 @@ def _remove_unsupported_params(
     return non_default_params
 
 
-def get_clean_extra_headers(extra_headers: dict, custom_llm_provider: str) -> dict:
-    """
-    For `anthropic-beta` headers, ensure provider is anthropic.
-
-    Vertex AI raises an exception if `anthropic-beta` is passed in.
-    """
-    if litellm.filter_invalid_headers is not True:  # allow user to opt out of filtering
-        return extra_headers
-    clean_extra_headers = {}
-    for k, v in extra_headers.items():
-        if k in ANTHROPIC_API_ONLY_HEADERS and custom_llm_provider != "anthropic":
-            verbose_logger.debug(
-                f"Provider {custom_llm_provider} does not support {k} header. Dropping from request, to prevent errors."
-            )  # Switching between anthropic api and vertex ai anthropic fails when anthropic-beta is passed in. Welcome feedback on this.
-        else:
-            clean_extra_headers[k] = v
-    return clean_extra_headers
-
-
 def get_optional_params(  # noqa: PLR0915
     # use the openai defaults
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -2758,12 +2721,6 @@ def get_optional_params(  # noqa: PLR0915
             is False
         )
     }
-
-    ## Supports anthropic headers
-    if extra_headers is not None:
-        extra_headers = get_clean_extra_headers(
-            extra_headers=extra_headers, custom_llm_provider=custom_llm_provider
-        )
 
     ## raise exception if function calling passed in for a provider that doesn't support it
     if (
@@ -3534,12 +3491,6 @@ def get_optional_params(  # noqa: PLR0915
         for k in passed_params.keys():
             if k not in default_params.keys():
                 optional_params[k] = passed_params[k]
-    if extra_headers is not None:
-        optional_params.setdefault("extra_headers", {})
-        optional_params["extra_headers"] = {
-            **optional_params["extra_headers"],
-            **extra_headers,
-        }
     print_verbose(f"Final returned optional params: {optional_params}")
     return optional_params
 
@@ -4034,7 +3985,7 @@ def _get_potential_model_names(
     elif custom_llm_provider and model.startswith(
         custom_llm_provider + "/"
     ):  # handle case where custom_llm_provider is provided and model starts with custom_llm_provider
-        split_model = model.split("/")[1]
+        split_model = model.split("/", 1)[1]
         combined_model_name = model
         stripped_model_name = _strip_model_name(
             model=split_model, custom_llm_provider=custom_llm_provider
@@ -5604,22 +5555,6 @@ def get_logging_id(start_time, response_obj):
         return response_id
     except Exception:
         return None
-
-
-def _get_base_model_from_litellm_call_metadata(
-    metadata: Optional[dict],
-) -> Optional[str]:
-    if metadata is None:
-        return None
-
-    if metadata is not None:
-        model_info = metadata.get("model_info", {})
-
-        if model_info is not None:
-            base_model = model_info.get("base_model", None)
-            if base_model is not None:
-                return base_model
-    return None
 
 
 def _get_base_model_from_metadata(model_call_details=None):

@@ -386,6 +386,7 @@ def _select_model_name_for_cost_calc(
     3. If completion response has model set return that
     4. Check if model is passed in return that
     """
+
     return_model: Optional[str] = None
     region_name: Optional[str] = None
     custom_llm_provider = _get_provider_for_cost_calc(
@@ -529,6 +530,7 @@ def completion_cost(  # noqa: PLR0915
         - For un-mapped Replicate models, the cost is calculated based on the total time used for the request.
     """
     try:
+
         call_type = _infer_call_type(call_type, completion_response) or "completion"
 
         if (
