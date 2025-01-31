@@ -151,6 +151,21 @@ spec:
                 secretKeyRef:
                   name: {{ include "litellm.fullname" . }}-secret
                   key: masterkey
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "litellm.fullname" . }}-secret
+                  key: OPENAI_API_KEY
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "litellm.fullname" . }}-secret
+                  key: ANTHROPIC_API_KEY
+            - name: DEEPSEEK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "litellm.fullname" . }}-secret
+                  key: DEEPSEEK_API_KEY
             {{- if .Values.redis.enabled }}
             - name: REDIS_HOST
               value: {{ include "litellm.redis.serviceName" . }}

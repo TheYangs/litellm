@@ -84,6 +84,15 @@ proxy_config:
       litellm_params:
         model: "*"
         api_key: os.environ/ANTHROPIC_API_KEY
+    # deepseek models
+    - model_name: "deepseek-chat" 
+      litellm_params:
+        model: "deepseek/deepseek-chat"
+        api_key: os.environ/DEEPSEEK_API_KEY
+    - model_name: "deepseek-reasoner" 
+      litellm_params:
+        model: "deepseek/deepseek-reasoner"
+        api_key: os.environ/DEEPSEEK_API_KEY
     # Ollama - deepseek-r1
     - model_name: "deepseek-r1" 
       litellm_params:
